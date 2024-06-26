@@ -61,17 +61,28 @@ const postComment = async (req: Request, res: Response, next: NextFunction): Pro
   }
   appSuccessHandler(201, "新增評價成功", comment, res)
 }
-// getCommentList暫時不用
 const getCommentList = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const { userId } = req.user as LoginResData
-  const { pageSize, page } = req.query as { pageSize?: string, page?: string }
+  const { id } = req.params
+  const { pageSize, page, sort } = req.query as { pageSize?: string, page?: string, sort?: string }
+  const dateSort = sort === "desc" ? "-updatedAt" : "updatedAt"
   const { parsedPageNumber, parsedPageSize } = checkPageSizeAndPageNumber(pageSize, page)
-  const [rawComments, userProfile] = await Promise.all([
-    Comment.find().populate({
-      path: "commentedUserId",
-      select: "userStatus"
-    }).skip((parsedPageNumber - 1) * parsedPageSize).limit(parsedPageSize),
-    Profile.findOne({ userId }).select("unlockComment")
+  const [rawComments, userProfile, totalCount] = await Promise.all([
+    Comment.find({ commentedUserId: id })
+      .populate({
+        path: "commentedUserId",
+        select: "userStatus"
+      })
+      .populate({
+        path: "commentUserProfile",
+        select: "nickNameDetails"
+      }).populate({
+        path: "commentUserUsername",
+        select: "personalInfo.username"
+      })
+      .sort(dateSort).skip((parsedPageNumber - 1) * parsedPageSize).limit(parsedPageSize),
+    Profile.findOne({ userId }).select("unlockComment"),
+    Comment.countDocuments()
   ])
   if (!userProfile) {
     appErrorHandler(404, "用戶不存在", next)
@@ -88,7 +99,15 @@ const getCommentList = async (req: Request, res: Response, next: NextFunction): 
     comment.isUnlock = unlockComment.includes(comment.commentedUserId as unknown as string)
     return comment
   })
-  appSuccessHandler(200, "查詢成功", comments, res)
+  const pagination = {
+    page: parsedPageNumber,
+    perPage: parsedPageSize,
+    totalCount
+  }
+  const response = {
+    comments, pagination
+  }
+  appSuccessHandler(200, "查詢成功", response, res)
 }
 const getCommentByUserId = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const { id } = req.params
@@ -96,16 +115,10 @@ const getCommentByUserId = async (req: Request, res: Response, next: NextFunctio
   const dateSort = sort === "desc" ? "-updatedAt" : "updatedAt"
   const { parsedPageNumber, parsedPageSize } = checkPageSizeAndPageNumber(pageSize, page)
   const beCommentedUserProfile = await Profile.findOne({ userId: id }).populate({
-    path: "matchListByUserId",
-    select: "personalInfo workInfo blacklist noticeInfo"
+    path: "matchListSelfSettingByUserId",
+    select: "personalInfo workInfo"
   })
   const [totalCount, comments] = await Promise.all([Comment.countDocuments({ commentedUserId: id }), Comment.find({ commentedUserId: id }).sort(dateSort).populate({ path: "commentUserProfile", select: "photoDetails nickNameDetails jobDetails userStatus" }).skip((parsedPageNumber - 1) * parsedPageSize).limit(parsedPageSize)])
-  // const totalCount = await Comment.countDocuments({ commentedUserId: id })
-  // const comments = await Comment.find({ commentedUserId: id }).sort(dateSort).populate({
-  //   path: "commentUserProfile",
-  //   select: "photoDetails nickNameDetails jobDetails userStatus"
-  // }
-  // ).skip((parsedPageNumber - 1) * parsedPageSize).limit(parsedPageSize)
   if (!comments) {
     appErrorHandler(404, "No comment found", next)
   } else {
@@ -220,22 +233,34 @@ const deleteComment = async (req: Request, res: Response, next: NextFunction): P
     {
       $set: {
         "userStatus.commentScore": {
-          $round: [// 四捨五入
-            {
-              $divide: [// 計算平均分數  (評分總和-評分)/(評分次數-1)
+          $cond: {
+            if: { $eq: ["$userStatus.commentCount", 1] },
+            then: 0,
+            else: {
+              $round: [
                 {
-                  $subtract: [// 總分數計算
-                    { $multiply: ["$userStatus.commentScore", "$userStatus.commentCount"] },
-                    score
+                  $divide: [
+                    {
+                      $subtract: [
+                        { $multiply: ["$userStatus.commentScore", "$userStatus.commentCount"] },
+                        score
+                      ]
+                    },
+                    { $subtract: ["$userStatus.commentCount", 1] }
                   ]
                 },
-                { $subtract: ["$userStatus.commentCount", 1] }
+                1
               ]
-            },
-            1
-          ]
+            }
+          }
         },
-        "userStatus.commentCount": { $subtract: ["$userStatus.commentCount", 1] }
+        "userStatus.commentCount": {
+          $cond: {
+            if: { $eq: ["$userStatus.commentCount", 1] },
+            then: 0,
+            else: { $subtract: ["$userStatus.commentCount", 1] }
+          }
+        }
       }
     }
   ])
